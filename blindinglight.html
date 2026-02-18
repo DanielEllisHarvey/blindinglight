@@ -45,12 +45,6 @@ var encKeyIter = 0;
 var baseMovement = 0;
 var order = Array.from(Array(64).keys())
 var unorder = Array.from(Array(64).keys());
-// for(let i=0; i<12; i++) {
-//     order.sort(function(){return (crypto.getRandomValues(new Uint8Array(4)))[0]-128});
-// }
-// order.forEach((e, i) => {
-//     unorder[e] = i
-// })
 
 let encode = {
 /**
@@ -89,7 +83,7 @@ let encode = {
     // base64CharsAlt: "_-+={gKk):;/?.,*<>!AaBnY3cDdEeFyIiMmN&^%$[@#]}bClVv12£(L4567890Q",
     base64CharsAlt: "b7@mM{+1!l#?;e][Cg0A£%B$aI(n,3Dd8c&_=ik4YQEy9-).2}/^<v>K:*N6LF5V",
     resetBase: function resetBase() {
-        base64CharsAlt = "b7@mM{+1!l#?;e][Cg0A£%B$aI(n,3Dd8c&_=ik4YQEy9-).2}/^<v>K:*N6LF5V"
+        encode.base64CharsAlt = "b7@mM{+1!l#?;e][Cg0A£%B$aI(n,3Dd8c&_=ik4YQEy9-).2}/^<v>K:*N6LF5V"
     },
     picker: function picker(n) {return encode.base64Chars.substring(n,n+1)},
     finder: function finder(x) {return x == "" ? -1 : encode.base64Chars.indexOf(x)},
@@ -538,24 +532,6 @@ decInput = async (inputBox) => {
     console.log(encData);
     document.getElementById("encdisp").innerText += "(DEC)\n" + encData + "\n";
 }
-function lightMode() {
-    Array.from(document.all).forEach(e => {
-        e.style.backgroundColor = "#fff"
-        e.style.color = "#000"
-        e.style.borderColor = "#000"
-        if(e.tagName == "BUTTON") {e.style.backgroundColor = "#eee"}
-        if(e.tagName == "A") {e.style.color = "#46f"}
-    })
-    localStorage.setItem("darkMode", "false")
-}
-function darkMode() {
-    Array.from(document.all).forEach(e => {
-        e.style.backgroundColor = "#203"
-        e.style.color = "#edf"
-        if(e.tagName == "A") {e.style.color = "#46f"}
-    })
-    localStorage.setItem("darkMode", "true")
-}
 documentloaded = async () => {
     setTimeout(async () => {
         
@@ -565,12 +541,12 @@ loadPublic = async (username, inpOrder, salt, nonce) => {
     encode.resetBase();
     baseMovement = 0;
     encKeyIter = 0;
+    console.log(encode.base64CharsAlt);
     order = [];
     let decOrder = "";
     let decSalt = "";
     X25519_public = localStorage.getItem("X25519_"+username+"_ext")
     Ed25519_public = localStorage.getItem("Ed25519_"+username+"_ext")
-    console.log(X25519_public !== null, X25519_public, ((X25519_public !== null) && (Ed25519_public !== null)))
     if(((X25519_public !== null) && (Ed25519_public !== null))) {
         await X25519_ext_set_exch(X25519_public);
         await Ed25519_ext_set_sign(Ed25519_public);
@@ -589,8 +565,6 @@ loadPublic = async (username, inpOrder, salt, nonce) => {
         encKey = await HKDF_deriveKeyTurn(sharedKey, encKeyIter, salts[encKeyIter]);
         encKeyIter++;
     }
-    
-    console.log(typeof inpOrder, (typeof inpOrder == "undefined"))
     if(typeof inpOrder == "undefined") {
         order = Array.from(Array(64).keys());
         for(let i=0; i<12; i++) {
@@ -600,16 +574,32 @@ loadPublic = async (username, inpOrder, salt, nonce) => {
         order = encode.b64_to_uint6arr(decOrder);
     }
     unorder = Array.from(Array(64).keys());
-    
     order.forEach((e, i) => {
         unorder[e] = i
     })
     document.getElementById("encdisp").innerText =
+        "Send to "+username+":\n" +
         "INIT>" +
         localStorage.getItem("username") +">"+
         await encryptSalt_AES_GCM(new TextEncoder().encode(encode.uint6arr_to_b64(order)), new TextEncoder().encode(encode.bytes_to_b64(salts[0]))) +"\n";
 }
-function setPublic(username, X25519_public, Ed25519_public) {
+loadPublicFromKdoc = (kdoc) => {
+    keys = kdoc.split(">");
+    if(keys[0] != "INIT") {
+        alert("Incorrect initdoc usage");
+        return;
+    } else {
+        loadPublic(keys[1], keys[2], keys[3], keys[4]);
+    }
+}
+loadPublicAuto = (value) => {
+    if(value.search(">") == -1) {
+        loadPublic(value);
+    } else {
+        loadPublicFromKdoc(value);
+    }
+}
+setPublic = (username, X25519_public, Ed25519_public) => {
     X25519_ls = localStorage.getItem("X25519_"+username+"_ext");
     Ed25519_ls = localStorage.getItem("Ed25519_"+username+"_ext");
     if((((X25519_ls !== null) || (Ed25519_ls !== null)) && (!confirm("User key already exists, continue?")))) {
@@ -630,21 +620,23 @@ function setPublic(username, X25519_public, Ed25519_public) {
     }
     // Add confirmation
 }
-function loadPublicFromKdoc(kdoc) {
-    keys = kdoc.split(">");
-    if(keys[0] != "INIT") {
-        alert("Incorrect initdoc usage");
-        return;
-    } else {
-        loadPublic(keys[1], keys[2], keys[3], keys[4])
-    }
+function lightMode() {
+    Array.from(document.all).forEach(e => {
+        e.style.backgroundColor = "#fff"
+        e.style.color = "#000"
+        e.style.borderColor = "#000"
+        if(e.tagName == "BUTTON") {e.style.backgroundColor = "#eee"}
+        if(e.tagName == "A") {e.style.color = "#46f"}
+    })
+    localStorage.setItem("darkMode", "false")
 }
-function loadPublicAuto(value) {
-    if(value.search(">") == -1) {
-        loadPublic(value);
-    } else {
-        loadPublicFromKdoc(value);
-    }
+function darkMode() {
+    Array.from(document.all).forEach(e => {
+        e.style.backgroundColor = "#203"
+        e.style.color = "#edf"
+        if(e.tagName == "A") {e.style.color = "#46f"}
+    })
+    localStorage.setItem("darkMode", "true")
 }
 </script>
 <body onload="documentloaded()">
@@ -671,8 +663,6 @@ function loadPublicAuto(value) {
             }
             await X25519_ls_set_exch_kp();
             await Ed25519_ls_set_sign_kp();
-            // await X25519_ls_display_exchkey();
-            // await Ed25519_ls_display_signkey();
             await ls_display_keyDoc();
 
             if(localStorage.getItem("users") != null)
@@ -680,7 +670,6 @@ function loadPublicAuto(value) {
                     document.getElementById("users").innerHTML += "<a href=\"#user="+user+"\" id=\""+user+"\" onclick=document.getElementById(\"extkeydoc\").value=\""+user+"\">"+user+"</a> "
                 });
         }, 50)
-        // console.log(localStorage.getItem("username") == null)
         while(localStorage.getItem("username") == null) {
             username = prompt("Set username; ,> are prohibited");
             console.log(username.match(/[>,]/g))
