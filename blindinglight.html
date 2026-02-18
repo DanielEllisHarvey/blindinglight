@@ -1,0 +1,749 @@
+<script>
+/**
+ * Options
+ */
+var opt_saltsize = 32; // Size of KDF salt in bytes (increases memory usage slightly)
+var opt_encryptprivate_X25519 = true;
+var opt_encryptprivate_Ed25519 = true;
+/**
+ * A list of key prefixes to remove/add when storing and setting keys
+ */
+var prefixes = {
+    "public": {
+        "X25519": "MCowBQYDK2VuAyEA",
+        "Ed25519": "MCowBQYDK2VwAyEA"
+    },
+    "private": {
+        "X25519": "MC4CAQAwBQYDK2VuBCIEI",
+        "Ed25519": "MC4CAQAwBQYDK2VwBCIEI"
+    }
+}
+/**
+ * Keystores
+ */
+var exchkey = {
+    "publicKey": null,
+    "privateKey": null
+}
+var signkey = {
+    "publicKey": null,
+    "privateKey": null
+}
+var exchkey_ext = {
+    "publicKey": null,
+    "privateKey": null
+}
+var signkey_ext = {
+    "publicKey": null,
+    "privateKey": null
+}
+var salts = []
+var kdfKey = null;
+var sharedKey = null;
+var encKey = null;
+var encKeyIter = 0;
+var baseMovement = 0;
+var order = Array.from(Array(64).keys())
+var unorder = Array.from(Array(64).keys());
+// for(let i=0; i<12; i++) {
+//     order.sort(function(){return (crypto.getRandomValues(new Uint8Array(4)))[0]-128});
+// }
+// order.forEach((e, i) => {
+//     unorder[e] = i
+// })
+
+let encode = {
+/**
+ * Set of encoding and decoding functions for handling bytes
+ */
+    int_to_uint8: function int_to_uint8(value) {
+        let bytes = new Uint8Array(4) // 32-bit short
+        for(let i=0; i<4; i++) {
+            bytes[i] = (value >> i*8) & 0xff
+        }
+        return bytes
+    },
+    uint8_to_int: function uint8_to_int(bytes) {
+        let value = 0
+        for(let i=0; i<4; i++) {
+            value += bytes[i] << i*8
+        }
+        return value
+    },
+    bytes_to_hex: function bytes_to_hex(bytes) {
+        let text = ""
+        for(let i = 0; i<bytes.length; i++) {
+            text += bytes[i].toString(16).padStart(2, "0")
+        }
+        return text
+    },
+    hex_to_bytes: function hex_to_bytes(text) {
+        let byteLength = text.length >> 1
+        let bytes = new Uint8Array(byteLength)
+        for(let i=0; i<byteLength; i++) bytes[i] = Number("0x"+text.substring(i*2, i*2+2))
+        return bytes
+    },
+    base64Chars: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+    // base64CharsAlt: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+    // base64CharsAlt: "_AB)DE|GHIJ?%/N^P#Q<TU~W:;Za(b£def hi-k+{}p*r[t]v&x@z$124>6!89.,",
+    // base64CharsAlt: "_-+={gKk):;/?.,*<>!AaBnY3cDdEeFyIiMmN&^%$[@#]}bClVv12£(L4567890Q",
+    base64CharsAlt: "b7@mM{+1!l#?;e][Cg0A£%B$aI(n,3Dd8c&_=ik4YQEy9-).2}/^<v>K:*N6LF5V",
+    resetBase: function resetBase() {
+        base64CharsAlt = "b7@mM{+1!l#?;e][Cg0A£%B$aI(n,3Dd8c&_=ik4YQEy9-).2}/^<v>K:*N6LF5V"
+    },
+    picker: function picker(n) {return encode.base64Chars.substring(n,n+1)},
+    finder: function finder(x) {return x == "" ? -1 : encode.base64Chars.indexOf(x)},
+    pickerAlt: function pickerAlt(n, c) {return c.substring(n,n+1)},
+    finderAlt: function finderAlt(x, c) {return x == "" ? -1 : c.indexOf(x)},
+    arrayBuffer_to_b64: function(arrayBuffer) {
+        return encode.bytes_to_b64(new Uint8Array(arrayBuffer))
+    },
+    arrayBuffer_to_a64: function(arrayBuffer, n) {
+        return encode.bytes_to_a64(new Uint8Array(arrayBuffer), n)
+    },
+    bytes_to_b64: function bytes_to_b64(bytes) {
+        let text = ""
+        let padding = bytes.length % 3
+        for(let i = 0; i<bytes.length; i+=3) {
+            text += encode.picker((bytes[i] & 252) >> 2)
+            text += encode.picker(((bytes[i] & 3) << 4) + ((bytes[i+1] & 240) >> 4))
+            text += encode.picker(((bytes[i+1] & 15) << 2) + ((bytes[i+2] & 192) >> 6))
+            text += encode.picker(bytes[i+2] & 63)
+        }
+        if(padding != 0) text = text.substring(0,text.length-(1+2-padding))
+        return text
+    },
+    bytes_to_a64: function bytes_to_a64(bytes, n) {
+        let c = baseShift_rel(n)
+        let text = ""
+        let padding = bytes.length % 3
+        for(let i = 0; i<bytes.length; i+=3) {
+            text += encode.pickerAlt((bytes[i] & 252) >> 2, c)
+            text += encode.pickerAlt(((bytes[i] & 3) << 4) + ((bytes[i+1] & 240) >> 4), c)
+            text += encode.pickerAlt(((bytes[i+1] & 15) << 2) + ((bytes[i+2] & 192) >> 6), c)
+            text += encode.pickerAlt(bytes[i+2] & 63, c)
+        }
+        if(padding != 0) text = text.substring(0,text.length-(1+2-padding))
+        return text
+    },
+    b64_to_bytes: function b64_to_bytes(text) {
+        text.replace("=", "")
+        let bytes = new Uint8Array(3*text.length/4)
+        let byteEnum = 0
+        for(let i=0; i<text.length; i+=4) {
+            let values = [
+                encode.finder(text.substring(i,i+1)),
+                encode.finder(text.substring(i+1,i+2)),
+                encode.finder(text.substring(i+2,i+3)),
+                encode.finder(text.substring(i+3,i+4))
+            ]
+            // (111111 (xxxxxx00) + 110000 (000000xx))
+            bytes[byteEnum] = (values[0] << 2) + ((values[1] & 48) >> 4)
+            // (001111 (xxxx0000) + 111100 (0000xxxx))
+            bytes[byteEnum+1] = ((values[1] & 15) << 4) + ((values[2] & 60) >> 2)
+            // (000011 (xx000000) + 111111 (00xxxxxx)
+            bytes[byteEnum+2] = ((values[2] & 3) << 6) + (values[3])
+            byteEnum+=3
+        }
+        return bytes
+    },
+    a64_to_bytes: function a64_to_bytes(text, n) {
+        let c = baseShift_rel(n)
+        text.replace("=", "")
+        let bytes = new Uint8Array(3*text.length/4)
+        let byteEnum = 0
+        for(let i=0; i<text.length; i+=4) {
+            let values = [
+                encode.finderAlt(text.substring(i,i+1), c),
+                encode.finderAlt(text.substring(i+1,i+2), c),
+                encode.finderAlt(text.substring(i+2,i+3), c),
+                encode.finderAlt(text.substring(i+3,i+4), c)
+            ]
+            // (111111 (xxxxxx00) + 110000 (000000xx))
+            bytes[byteEnum] = (values[0] << 2) + ((values[1] & 48) >> 4)
+            // (001111 (xxxx0000) + 111100 (0000xxxx))
+            bytes[byteEnum+1] = ((values[1] & 15) << 4) + ((values[2] & 60) >> 2)
+            // (000011 (xx000000) + 111111 (00xxxxxx)
+            bytes[byteEnum+2] = ((values[2] & 3) << 6) + (values[3])
+            byteEnum+=3
+        }
+        return bytes
+    },
+    int_to_b64: function int_to_b64(value) {
+        let bytes = encode.int_to_uint8(value)
+        return encode.bytes_to_b64(bytes)
+    },
+    b64_to_int: function b64_to_int(text) {
+        let bytes = encode.b64_to_bytes(text)
+        if(bytes.byteLength < 4) throw Error("SizeError: Value too large (more than 4 bytes)")
+        return encode.uint8_to_int(bytes)
+    },
+    uint6arr_to_b64: function uint6arr_to_b64(uint6arr) {
+        let text = ""
+        for(let i=0; i<uint6arr.length; i+=1)
+            text += encode.picker(uint6arr[i])
+        return text
+    },
+    b64_to_uint6arr: function b64_to_uint6arr(text) {
+        let uint6arr = []
+        for(let i=0; i<text.length; i+=1)
+            uint6arr.push(encode.finder(text[i]))
+        console.log(uint6arr)
+        return uint6arr
+    }
+}
+
+set_keypair_localstorage = (ckp, use) => {
+/**
+ * Puts keypairs (CryptoKeyPair) in localStorage.
+ * *ckp*    - Keypair
+ * *use*    - What the key is used for (sign, exch, wrap, derv)
+ */
+    crypto.subtle.exportKey(
+        "pkcs8",
+        ckp.privateKey
+    ).then(prikeydata =>
+        localStorage.setItem(
+            ckp.privateKey.algorithm.name + "_" + use + "prikey",
+            encode.arrayBuffer_to_b64(prikeydata).replace(prefixes["private"][ckp.privateKey.algorithm.name],"")
+        )
+    );
+    crypto.subtle.exportKey(
+        "spki",
+        ckp.publicKey
+    ).then(pubkeydata =>
+        localStorage.setItem(
+            ckp.publicKey.algorithm.name + "_" + use + "pubkey",
+            encode.arrayBuffer_to_b64(pubkeydata).replace(prefixes["public"][ckp.publicKey.algorithm.name],"")
+        )
+    );
+}
+change_key_use = async (key, newAlgo, extractable, newUse) => {
+/**
+ * Change the use of a cryptokey by extracting and reimporting
+ * *key*        - CryptoKey to change
+ * *newAlgo*    - algorithm to switch to as object
+ * *extractable*- bool
+ * *newUse*     - list of capabilities as list [encrypt, decrypt, sign, deriveBits, deriveKey, wrapKey, unwrapKey]
+ */
+    if(!key.extractable) {
+        console.error("Incapable error: cannot export key", key)
+        return;
+    }
+    let keyData = await crypto.subtle.exportKey("raw", key);
+    return await crypto.subtle.importKey("raw", keyData, newAlgo, extractable, newUse);
+}
+X25519_gen_exch_kp = async () => {
+/**
+ * Generates a new X25519 exch key and places into localStorage
+ */
+    crypto.subtle.generateKey("X25519", true, ["deriveBits", "deriveKey"])
+        .then(keypair => set_keypair_localstorage(keypair, "exch"));
+}
+Ed25519_gen_sign_kp = async () => {
+    crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"])
+        .then(keypair => set_keypair_localstorage(keypair, "sign"));
+}
+X25519_ls_set_exch_kp = async () => {
+/**
+ * Get X25519 exch key from localStorage and assign to variable
+ */
+    exchkey.privateKey = await crypto.subtle.importKey(
+        "pkcs8",
+        encode.b64_to_bytes(prefixes["private"]["X25519"]+localStorage.getItem("X25519_exchprikey")),
+        "X25519",
+        true,
+        ["deriveBits", "deriveKey"]
+    );
+    exchkey.publicKey = await crypto.subtle.importKey(
+        "spki",
+        encode.b64_to_bytes(prefixes["public"]["X25519"]+localStorage.getItem("X25519_exchpubkey")),
+        "X25519",
+        true,
+        []
+    );
+}
+Ed25519_ls_set_sign_kp = async () => {
+/**
+ * Get Ed25519 sign key from localStorage and assign to variable
+ */
+    signkey.privateKey = await crypto.subtle.importKey(
+        "pkcs8",
+        encode.b64_to_bytes(prefixes["private"]["Ed25519"]+localStorage.getItem("Ed25519_signprikey")),
+        "Ed25519",
+        false,
+        ["sign"]
+    );
+    signkey.publicKey = await crypto.subtle.importKey(
+        "spki",
+        encode.b64_to_bytes(prefixes["public"]["Ed25519"]+localStorage.getItem("Ed25519_signpubkey")),
+        "Ed25519",
+        false,
+        ["verify"]
+    );
+}
+X25519_ext_set_exch = async (pub) => {
+/**
+ * Get X25519 exch key from localStorage and assign to variable
+ * *pub*    - X25519 public key to set (as B64 spki)
+ */
+    exchkey_ext.publicKey = await crypto.subtle.importKey(
+        "spki",
+        encode.b64_to_bytes(prefixes["public"]["X25519"]+pub),
+        "X25519",
+        true,
+        []
+    );
+}
+Ed25519_ext_set_sign = async (pub) => {
+/**
+ * Get Ed25519 sign key from localStorage and assign to variable
+ */
+    signkey_ext.publicKey = await crypto.subtle.importKey(
+        "spki",
+        encode.b64_to_bytes(prefixes["public"]["Ed25519"]+pub),
+        "Ed25519",
+        false,
+        ["verify"]
+    );
+}
+X25519_ls_display_exchkey = async () => {
+/**
+ * Display asymmetric public keys on screen
+ */
+    document.getElementById("exchpubkeydisp").innerText = localStorage.getItem("X25519_exchpubkey");
+}
+Ed25519_ls_display_signkey = async () => {
+    document.getElementById("signpubkeydisp").innerText = localStorage.getItem("Ed25519_signpubkey");
+}
+ls_display_keyDoc = async () => {
+    kdoc = "KDOC>" +
+    localStorage.getItem("username") + ">" +
+    localStorage.getItem("X25519_exchpubkey") + ">" +
+    localStorage.getItem("Ed25519_signpubkey"); // + ">" + 
+    document.getElementById("keydocdisp").innerText = kdoc
+    document.getElementById("yourkey").innerText = kdoc
+
+    // encode.bytes_to_b64(crypto.getRandomValues(new Uint8Array(128)));
+}
+importPubkeys = (str) => {
+    keys = str.split(">");
+    if(keys[0] != "KDOC") {
+        alert("Incorrect keydoc use");
+        return;
+    } else {
+        username = keys[1];
+        X25519_public = keys[2];
+        Ed25519_public = keys[3];
+        // nonce = keys[3];
+        setPublic(username, X25519_public, Ed25519_public);
+    }
+}
+Ed25519_sign = async (privateKey, message) => {
+/**
+ * Sign a message (Ed25519), returns Promise<UInt8Array>
+ * 
+ * privateKey<CryptoKey{Ed25519}>
+ * message<string>
+ */
+    return crypto.subtle.sign("Ed25519", privateKey, message);
+}
+Ed25519_verify = async (publicKey, signature, data) => {
+    return crypto.subtle.verify("Ed25519", publicKey, signature, data);
+}
+AES_GCM_encrypt = async (key, message) => {
+/**
+ * Encrypt a message using AES-GCM, returns promise<ArrayBuffer>
+ * Puts the IV at the end of the ciphertext (post encrypt)
+ * Please use a KDF (HKDF_deriveKeyTurn)
+ * 
+ * key<CryptoKey{S256}>
+ * message<string>
+ */
+    let iv = crypto.getRandomValues(new Uint8Array(12));
+    let ct = await crypto.subtle.encrypt(
+        {name: "AES-GCM", iv},
+        key,
+        new TextEncoder().encode(message)
+    )
+    let splice = new Uint8Array(ct.byteLength + iv.byteLength)
+    splice.set(new Uint8Array(ct), 0);
+    splice.set(iv, ct.byteLength);
+    return splice.buffer;
+}
+AES_GCM_decrypt = async (key, ciphertext) => {
+    // let cipherBytes = encode.b64_to_bytes(ciphertext).slice(0, -64);
+    let cipherBytes = new Uint8Array(ciphertext); // .slice(0, -64);
+    let iv = cipherBytes.subarray(-12);
+    return await crypto.subtle.decrypt(
+        {name: "AES-GCM", iv},
+        key,
+        cipherBytes.subarray(0, -12)
+    )
+}
+X25519_agreeKey = async (privateKey, publicKey) => {
+/**
+ * Derive shared key using X25519, returns Promise<ArrayBuffer>
+ * Please use a KDF to make the output more secure
+ * 
+ * privateKey<CryptoKey{X25519}>
+ * publicKey<CryptoKey{X25519}>
+ */
+    return crypto.subtle.deriveBits({"name": "X25519", "public": publicKey}, privateKey, 256)
+}
+HKDF_deriveKeyTurn = async (encKey, iter, salt) => {
+/**
+ * Automatically derive next key (needs key params), returns Promise<CryptoKey>
+ * 
+ * encKey<ArrayBuffer<256>>
+ * iter<int>
+ * salt<ArrayBuffer>
+ */
+    return crypto.subtle.deriveKey(
+        {name: "HKDF", salt, info: new TextEncoder().encode("HKDFDerivedKey"+encode.int_to_b64(iter)), hash: "SHA-256"},
+        await crypto.subtle.importKey(
+            "raw",
+            encKey,
+            {"name": "HKDF", "hash": "SHA-256"},
+            false,
+            ["deriveBits", "deriveKey"]
+        ),
+        {"name": "AES-GCM", "length": 256},
+        true,
+        ["encrypt", "decrypt"]
+    )
+}
+HKDF_deriveAuto = async () => {
+    // salts.push(await crypto.getRandomValues(new Uint8Array(opt_saltsize)));
+    encKey = await HKDF_deriveKeyTurn(
+        await crypto.subtle.exportKey("raw", encKey),
+        encKeyIter,
+        salts[encKeyIter]
+    );
+    encKeyIter++;
+}
+encryptAndSign_AES_GCM_Ed25519 = async (signKey, encKey, message) => {
+    let encData = await AES_GCM_encrypt(encKey, message); // 38 + datalen B64
+    let signature = await Ed25519_sign(signkey.privateKey, encData); // 86 B64
+
+    let splice = new Uint8Array(encData.byteLength + signature.byteLength)
+    splice.set(new Uint8Array(encData), 0);
+    splice.set(new Uint8Array(signature), encData.byteLength);
+    return encode.arrayBuffer_to_a64(splice.buffer, 0) + encode.int_to_b64(baseMovement);
+}
+decryptAndVerify_AES_GCM_Ed25519 = async (signKey, encKey, message) => {
+    let shift = encode.b64_to_int(message.slice(-6)) - baseMovement;
+    let bytes = encode.a64_to_bytes(message.slice(0,-6), shift);
+    let ciphertext = bytes.subarray(0, -64);
+    let signature = bytes.subarray(-64);
+    if(await Ed25519_verify(signKey, signature, ciphertext)) {
+        return new TextDecoder().decode(await AES_GCM_decrypt(encKey, ciphertext));
+    } else {
+        throw Error("Signature verification invalid error: "+encode.bytes_to_a64(signature, shift))
+        return false
+    }
+}
+encryptSalt_AES_GCM = async (order, salt) => {
+    /**
+     * Encrypt the session salt and base order
+     */
+    let nonce = await crypto.getRandomValues(new Uint8Array(16));
+    let sharedBits = await X25519_agreeKey(exchkey.privateKey, exchkey_ext.publicKey);
+    let sharedKey = await crypto.subtle.importKey("raw", sharedBits, {"name": "HKDF", "hash": "SHA-256"}, false, ["deriveBits", "deriveKey"]);
+    let saltIV = await crypto.getRandomValues(new Uint8Array(12));
+    let orderIV = await crypto.getRandomValues(new Uint8Array(12));
+    let saltKey = await crypto.subtle.deriveKey({"name": "HKDF", "salt": nonce, info: nonce, "hash": "SHA-256"}, sharedKey, {"name": "AES-GCM", "length": 256}, true, ["encrypt"]);
+    let orderKey = await crypto.subtle.deriveKey({"name": "HKDF", "salt": nonce, info: nonce, "hash": "SHA-256"}, sharedKey, {"name": "AES-GCM", "length": 256}, true, ["encrypt"]);
+    let encSalt = encode.arrayBuffer_to_b64(await crypto.subtle.encrypt({"name": "AES-GCM", "iv": saltIV, "length": 256}, saltKey, salt))+"."+encode.bytes_to_b64(saltIV);
+    let encOrder = encode.arrayBuffer_to_b64(await crypto.subtle.encrypt({"name": "AES-GCM", "iv": orderIV, "length": 256}, orderKey, order))+"."+encode.bytes_to_b64(orderIV);
+    return encOrder + ">" + encSalt + ">" + encode.bytes_to_b64(nonce);
+}
+decryptSalt_AES_GCM = async (order, salt, nonce, sharedBits) => {
+    let sharedKey = await crypto.subtle.importKey("raw", sharedBits, {"name": "HKDF", "hash": "SHA-256"}, false, ["deriveKey", "deriveBits"]);
+    let saltIV = encode.b64_to_bytes(salt.split(".")[1]);
+    let orderIV = encode.b64_to_bytes(order.split(".")[1]);
+    nonce = encode.b64_to_bytes(nonce);
+    let saltKey = await crypto.subtle.deriveKey({"name": "HKDF", info: nonce, "salt": nonce, "hash": "SHA-256"}, sharedKey, {"name": "AES-GCM", "length": 256}, true, ["decrypt"]);
+    let orderKey = await crypto.subtle.deriveKey({"name": "HKDF", info: nonce, "salt": nonce, "hash": "SHA-256"}, sharedKey, {"name": "AES-GCM", "length": 256}, true, ["decrypt"]);
+    let decSalt = await crypto.subtle.decrypt({"name": "AES-GCM", "iv": saltIV, "length": 256}, saltKey, encode.b64_to_bytes(salt.split(".")[0]));
+    let decOrder = await crypto.subtle.decrypt({"name": "AES-GCM", "iv": orderIV, "length": 256}, orderKey, encode.b64_to_bytes(order.split(".")[0]));
+    console.log(decOrder, decSalt, order, salt);
+    return [new TextDecoder().decode(decOrder), new TextDecoder().decode(decSalt)];
+}
+baseShift_rel = (n) => {
+    if(Math.abs(n) > 262144) { console.log("Relative base shift exceeded maximum (262143)"); return; }
+    if(n<=0) {
+        return baseShiftBackward(-n);
+    }
+    else {
+        return baseShiftForward(n);
+    }
+}
+baseShiftForward = (n) => {
+    let currentChars = encode.base64CharsAlt;
+    for(let i=0; i<n; i++) {
+        let tmpBase = currentChars.split('');
+        let base64CharsAlt = currentChars.split('')
+        order.forEach((e, i) => {
+            tmpBase[i] = base64CharsAlt[e];
+        })
+        currentChars = tmpBase.join('');
+    }
+    return currentChars;
+}
+baseShiftBackward = (n) => {
+    let currentChars = encode.base64CharsAlt;
+    for(let i=0; i<n; i++) {
+        let tmpBase = currentChars.split('');
+        let base64CharsAlt = currentChars.split('');
+        unorder.forEach((e, i) => {
+            tmpBase[i] = base64CharsAlt[e];
+        })
+        currentChars = tmpBase.join('');
+    }
+    return currentChars;
+}
+baseShiftForwardAuto = (n) => {
+    baseMovement += n;
+    for(let i=0; i<n; i++) {
+        let tmpBase = encode.base64CharsAlt.split('');
+        let base64CharsAlt = encode.base64CharsAlt.split('');
+        order.forEach((e, i) => {
+            tmpBase[i] = base64CharsAlt[e];
+        })
+        encode.base64CharsAlt = tmpBase.join('');
+    }
+    console.log(encode.base64CharsAlt);
+}
+baseShiftBackwardAuto = (n) => {
+    baseMovement -= n;
+    for(let i=0; i<n; i++) {
+        let tmpBase = encode.base64CharsAlt.split('');
+        let base64CharsAlt = encode.base64CharsAlt.split('');
+        unorder.forEach((e, i) => {
+            tmpBase[i] = base64CharsAlt[e];
+        })
+        encode.base64CharsAlt = tmpBase.join('');
+    }
+    console.log(encode.base64CharsAlt);
+}
+encInput = async (inputBox) => {
+    let encData = await encryptAndSign_AES_GCM_Ed25519(signkey.privateKey, encKey, document.getElementById(inputBox).value); // 38 + datalen B64
+    document.getElementById("encdisp").innerText += "(ENC)\n" + encData + "\n";
+    console.log(await decryptAndVerify_AES_GCM_Ed25519(signkey.publicKey, encKey, encData));
+    baseShiftForwardAuto(Math.floor(Math.random()*1000));
+}
+decInput = async (inputBox) => {
+    let encData = await decryptAndVerify_AES_GCM_Ed25519(signkey_ext.publicKey, encKey, document.getElementById(inputBox).value);
+    console.log(encData);
+    document.getElementById("encdisp").innerText += "(DEC)\n" + encData + "\n";
+}
+function lightMode() {
+    Array.from(document.all).forEach(e => {
+        e.style.backgroundColor = "#fff"
+        e.style.color = "#000"
+        e.style.borderColor = "#000"
+        if(e.tagName == "BUTTON") {e.style.backgroundColor = "#eee"}
+        if(e.tagName == "A") {e.style.color = "#46f"}
+    })
+    localStorage.setItem("darkMode", "false")
+}
+function darkMode() {
+    Array.from(document.all).forEach(e => {
+        e.style.backgroundColor = "#203"
+        e.style.color = "#edf"
+        if(e.tagName == "A") {e.style.color = "#46f"}
+    })
+    localStorage.setItem("darkMode", "true")
+}
+documentloaded = async () => {
+    setTimeout(async () => {
+        
+    }, 10)
+}
+loadPublic = async (username, inpOrder, salt, nonce) => {
+    encode.resetBase();
+    baseMovement = 0;
+    encKeyIter = 0;
+    order = [];
+    let decOrder = "";
+    let decSalt = "";
+    X25519_public = localStorage.getItem("X25519_"+username+"_ext")
+    Ed25519_public = localStorage.getItem("Ed25519_"+username+"_ext")
+    console.log(X25519_public !== null, X25519_public, ((X25519_public !== null) && (Ed25519_public !== null)))
+    if(((X25519_public !== null) && (Ed25519_public !== null))) {
+        await X25519_ext_set_exch(X25519_public);
+        await Ed25519_ext_set_sign(Ed25519_public);
+        sharedKey = await X25519_agreeKey(exchkey.privateKey, exchkey_ext.publicKey);
+        if(((typeof inpOrder != "undefined") && (typeof salt != "undefined"))) {
+            [decOrder, decSalt] = await decryptSalt_AES_GCM(inpOrder, salt, nonce, sharedKey);
+        }
+        if(typeof salt == "undefined") {
+            salts[0] = (await crypto.getRandomValues(new Uint8Array(opt_saltsize)));
+            // console.log(encode.bytes_to_b64(salts[0]))
+        } else {
+            salts[0] = (encode.b64_to_bytes(decSalt));
+        }
+        baseShiftForwardAuto(1);
+
+        encKey = await HKDF_deriveKeyTurn(sharedKey, encKeyIter, salts[encKeyIter]);
+        encKeyIter++;
+    }
+    
+    console.log(typeof inpOrder, (typeof inpOrder == "undefined"))
+    if(typeof inpOrder == "undefined") {
+        order = Array.from(Array(64).keys());
+        for(let i=0; i<12; i++) {
+            order.sort(function(){return (crypto.getRandomValues(new Uint8Array(4)))[0]-128});
+        }
+    } else {
+        order = encode.b64_to_uint6arr(decOrder);
+    }
+    unorder = Array.from(Array(64).keys());
+    
+    order.forEach((e, i) => {
+        unorder[e] = i
+    })
+    document.getElementById("encdisp").innerText =
+        "INIT>" +
+        localStorage.getItem("username") +">"+
+        await encryptSalt_AES_GCM(new TextEncoder().encode(encode.uint6arr_to_b64(order)), new TextEncoder().encode(encode.bytes_to_b64(salts[0]))) +"\n";
+}
+function setPublic(username, X25519_public, Ed25519_public) {
+    X25519_ls = localStorage.getItem("X25519_"+username+"_ext");
+    Ed25519_ls = localStorage.getItem("Ed25519_"+username+"_ext");
+    if((((X25519_ls !== null) || (Ed25519_ls !== null)) && (!confirm("User key already exists, continue?")))) {
+        return;
+    }
+    else {
+        localStorage.setItem("X25519_"+username+"_ext", X25519_public);
+        localStorage.setItem("Ed25519_"+username+"_ext", Ed25519_public);
+        index = -1
+        if(typeof localStorage["users"] != "undefined")
+            index = localStorage.getItem("users").split(",").indexOf(username)
+        if(index == -1) {
+            if(typeof localStorage["users"] == "undefined")
+                localStorage["users"] = username + ",";
+            else
+                localStorage["users"] += username + ",";
+        }
+    }
+    // Add confirmation
+}
+function loadPublicFromKdoc(kdoc) {
+    keys = kdoc.split(">");
+    if(keys[0] != "INIT") {
+        alert("Incorrect initdoc usage");
+        return;
+    } else {
+        loadPublic(keys[1], keys[2], keys[3], keys[4])
+    }
+}
+function loadPublicAuto(value) {
+    if(value.search(">") == -1) {
+        loadPublic(value);
+    } else {
+        loadPublicFromKdoc(value);
+    }
+}
+</script>
+<body onload="documentloaded()">
+    <script>
+        setTimeout(async () => {
+            if(
+                (localStorage.getItem("darkMode") === null) ||
+                (localStorage.getItem("darkMode") == "true")
+            ) {
+                darkMode();
+            }
+            else {
+                lightMode();
+            }
+            /**
+             * Checks for X25519 exch key in localStorage, generates if none found
+             */
+            if(
+                (localStorage.getItem("X25519_exchprikey") === null) ||
+                (localStorage.getItem("Ed25519_signprikey") === null)
+            ) {
+                await X25519_gen_exch_kp();
+                await Ed25519_gen_sign_kp();
+            }
+            await X25519_ls_set_exch_kp();
+            await Ed25519_ls_set_sign_kp();
+            // await X25519_ls_display_exchkey();
+            // await Ed25519_ls_display_signkey();
+            await ls_display_keyDoc();
+
+            if(localStorage.getItem("users") != null)
+                localStorage.getItem("users").split(",").forEach(user => {
+                    document.getElementById("users").innerHTML += "<a href=\"#user="+user+"\" id=\""+user+"\" onclick=document.getElementById(\"extkeydoc\").value=\""+user+"\">"+user+"</a> "
+                });
+        }, 50)
+        // console.log(localStorage.getItem("username") == null)
+        while(localStorage.getItem("username") == null) {
+            username = prompt("Set username; ,> are prohibited");
+            console.log(username.match(/[>,]/g))
+            if(username.match(/[>,]/g) == null)
+                localStorage.setItem("username", username);
+        }
+    </script>
+    <pre id="keydocdisp"></pre>
+    <button id="invisBtn" style="visibility: hidden; position: absolute;"></button>
+    <a id="invisAnchor" style="visibility: hidden; position: absolute;"></a>
+    <details>
+        <summary>Advanced options</summary>
+        <fieldset style="width: fit-content; display: grid;">
+            <!-- <div style="width: fit-content; display: flex;">
+                <div>
+                    <pre style="padding-right: 28px">Generate key</pre>
+                    <button id="generate">Generate</button>
+                </div>
+                <br>
+                <div>
+                    <pre>Upload key</pre>
+                    <input id="uploadPicker" type="file">
+                </div>
+                <br>
+                <div>
+                    <pre>Download key</pre>
+                    <button id="download">Download</button>
+                </div>
+                <br>
+                <div style="margin-left: 32px;">
+                    <pre>Hostname</pre>
+                    <input id="hostname"><button display="default" id="hostnameBtn">Set</button>
+                </div> -->
+                <div>
+                    <pre>Theme</pre>
+                    <button onclick='lightMode()'>Light Mode</button>
+                    <button onclick='darkMode()'>Dark Mode</button>
+                </div>
+            </div>
+            <hr style="width: 100%;">
+            <div>
+                <div style="width: fit-content; display: flex; position: relative; top: -8px">
+                    <div>
+                        <pre>Add external keydoc</pre>
+                        <textarea id="addPublicKey"></textarea>
+                        <button onclick="importPubkeys(document.getElementById('addPublicKey').value)" id="addPublicKeyBtn" style="position: relative; top: -3px;">Add</button>
+                    </div>
+                    <div style="margin-left: 32px;">
+                        <pre>Your keydoc</pre>
+                        <textarea id="yourkey"></textarea>
+                    </div>
+                </div>
+            </div>
+        </fieldset>
+    </details>
+    
+    <pre id="users"></pre>
+    <input type="text" style="width: 500px" id="extkeydoc" placeholder="INIT keydoc or username...">
+    <button onclick="loadPublicAuto(document.getElementById('extkeydoc').value)">Use</button>
+    <br>
+    <textarea id="msginpenc"></textarea><button id="msgencbtn" onclick="encInput('msginpenc')">Encrypt</button>
+    <textarea id="msginpdec"></textarea><button id="msgdecbtn" onclick="decInput('msginpdec')">Decrypt</button>
+    <pre id="encdisp"></pre>
+</head>
+</html>
+</body>
