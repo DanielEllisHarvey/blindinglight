@@ -441,13 +441,15 @@ encryptSalt_AES_GCM = async (order, salt) => {
     /**
      * Encrypt the session salt and base order
      */
-    let nonce = await crypto.getRandomValues(new Uint8Array(16));
+    let nonce = await crypto.getRandomValues(new Uint8Array(20));
+    let saltNonce = new Uint8Array(nonce.byteLength + 16);
+    saltNonce.set(new TextEncoder().encode("salt"), nonce.byteLength);
     let sharedBits = await X25519_agreeKey(exchkey.privateKey, exchkey_ext.publicKey);
     let sharedKey = await crypto.subtle.importKey("raw", sharedBits, {"name": "HKDF", "hash": "SHA-256"}, false, ["deriveBits", "deriveKey"]);
     let saltIV = await crypto.getRandomValues(new Uint8Array(12));
     let orderIV = await crypto.getRandomValues(new Uint8Array(12));
-    let saltKey = await crypto.subtle.deriveKey({"name": "HKDF", "salt": nonce, info: nonce, "hash": "SHA-256"}, sharedKey, {"name": "AES-GCM", "length": 256}, true, ["encrypt"]);
-    let orderKey = await crypto.subtle.deriveKey({"name": "HKDF", "salt": nonce, info: nonce, "hash": "SHA-256"}, sharedKey, {"name": "AES-GCM", "length": 256}, true, ["encrypt"]);
+    let saltKey = await crypto.subtle.deriveKey({"name": "HKDF", "salt": saltNonce, "info": saltNonce, "hash": "SHA-256"}, sharedKey, {"name": "AES-GCM", "length": 256}, true, ["encrypt"]);
+    let orderKey = await crypto.subtle.deriveKey({"name": "HKDF", "salt": nonce, "info": nonce, "hash": "SHA-256"}, sharedKey, {"name": "AES-GCM", "length": 256}, true, ["encrypt"]);
     let encSalt = encode.arrayBuffer_to_b64(await crypto.subtle.encrypt({"name": "AES-GCM", "iv": saltIV, "length": 256}, saltKey, salt))+"."+encode.bytes_to_b64(saltIV);
     let encOrder = encode.arrayBuffer_to_b64(await crypto.subtle.encrypt({"name": "AES-GCM", "iv": orderIV, "length": 256}, orderKey, order))+"."+encode.bytes_to_b64(orderIV);
     return encOrder + ">" + encSalt + ">" + encode.bytes_to_b64(nonce);
@@ -457,8 +459,10 @@ decryptSalt_AES_GCM = async (order, salt, nonce, sharedBits) => {
     let saltIV = encode.b64_to_bytes(salt.split(".")[1]);
     let orderIV = encode.b64_to_bytes(order.split(".")[1]);
     nonce = encode.b64_to_bytes(nonce);
-    let saltKey = await crypto.subtle.deriveKey({"name": "HKDF", info: nonce, "salt": nonce, "hash": "SHA-256"}, sharedKey, {"name": "AES-GCM", "length": 256}, true, ["decrypt"]);
-    let orderKey = await crypto.subtle.deriveKey({"name": "HKDF", info: nonce, "salt": nonce, "hash": "SHA-256"}, sharedKey, {"name": "AES-GCM", "length": 256}, true, ["decrypt"]);
+    let saltNonce = new Uint8Array(nonce.byteLength + 16);
+    saltNonce.set(new TextEncoder().encode("salt"), nonce.byteLength);
+    let saltKey = await crypto.subtle.deriveKey({"name": "HKDF", "info": saltNonce, "salt": saltNonce, "hash": "SHA-256"}, sharedKey, {"name": "AES-GCM", "length": 256}, true, ["decrypt"]);
+    let orderKey = await crypto.subtle.deriveKey({"name": "HKDF", "info": nonce, "salt": nonce, "hash": "SHA-256"}, sharedKey, {"name": "AES-GCM", "length": 256}, true, ["decrypt"]);
     let decSalt = await crypto.subtle.decrypt({"name": "AES-GCM", "iv": saltIV, "length": 256}, saltKey, encode.b64_to_bytes(salt.split(".")[0]));
     let decOrder = await crypto.subtle.decrypt({"name": "AES-GCM", "iv": orderIV, "length": 256}, orderKey, encode.b64_to_bytes(order.split(".")[0]));
     console.log(decOrder, decSalt, order, salt);
